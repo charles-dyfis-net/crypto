@@ -6,6 +6,7 @@ package packet
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/cipher"
 	"crypto/dsa"
 	"crypto/ecdsa"
@@ -33,6 +34,10 @@ type PrivateKey struct {
 	PrivateKey    interface{} // An *rsa.PrivateKey or *dsa.PrivateKey.
 	sha1Checksum  bool
 	iv            []byte
+
+	// External signer: May have access to key material we don't have in
+	// memory (potentially through a web service, hardware interface, etc).
+	ExternalSigner crypto.Signer
 }
 
 func NewRSAPrivateKey(currentTime time.Time, priv *rsa.PrivateKey) *PrivateKey {

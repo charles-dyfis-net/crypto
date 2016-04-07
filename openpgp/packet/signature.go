@@ -10,9 +10,11 @@ import (
 	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"encoding/asn1"
 	"encoding/binary"
 	"hash"
 	"io"
+	"math/big"
 	"strconv"
 	"time"
 
@@ -516,26 +518,77 @@ func (sig *Signature) Sign(h hash.Hash, priv *PrivateKey, config *Config) (err e
 
 	switch priv.PubKeyAlgo {
 	case PubKeyAlgoRSA, PubKeyAlgoRSASignOnly:
-		sig.RSASignature.bytes, err = rsa.SignPKCS1v15(config.Random(), priv.PrivateKey.(*rsa.PrivateKey), sig.Hash, digest)
+		if priv.ExternalSigner != nil {
+			bytes, err := priv.ExternalSigner.Sign(config.Random(), digest, config.Hash())
+			if err != nil {
+				return err
+			}
+			if len(bytes) == 0 {
+				return errors.SignatureError("Zero-byte signature returned by external implementation")
+			}
+			sig.RSASignature.bytes = bytes
+		} else {
+			sig.RSASignature.bytes, err = rsa.SignPKCS1v15(config.Random(), priv.PrivateKey.(*rsa.PrivateKey), sig.Hash, digest)
+		}
 		sig.RSASignature.bitLength = uint16(8 * len(sig.RSASignature.bytes))
 	case PubKeyAlgoDSA:
-		dsaPriv := priv.PrivateKey.(*dsa.PrivateKey)
+		if priv.ExternalSigner != nil {
+			bytes, err := priv.ExternalSigner.Sign(config.Random(), digest, config.Hash())
+			if err != nil {
+				return err
+			}
+			type asn1Signature struct {
+				R, S *big.Int
+			}
+			asn1Sig := new(asn1Signature)
+			_, err = asn1.Unmarshal(bytes, asn1Sig)
+			if err != nil {
+				return err
+			}
 
-		// Need to truncate hashBytes to match FIPS 186-3 section 4.6.
-		subgroupSize := (dsaPriv.Q.BitLen() + 7) / 8
-		if len(digest) > subgroupSize {
-			digest = digest[:subgroupSize]
+			sig.DSASigR.bytes = asn1Sig.R.Bytes()
+			sig.DSASigS.bytes = asn1Sig.S.Bytes()
+		} else {
+			dsaPriv := priv.PrivateKey.(*dsa.PrivateKey)
+
+			// Need to truncate hashBytes to match FIPS 186-3 section 4.6.
+			subgroupSize := (dsaPriv.Q.BitLen() + 7) / 8
+			if len(digest) > subgroupSize {
+				digest = digest[:subgroupSize]
+			}
+			r, s, err := dsa.Sign(config.Random(), dsaPriv, digest)
+			if err == nil {
+				sig.DSASigR.bytes = r.Bytes()
+				sig.DSASigS.bytes = s.Bytes()
+			}
 		}
-		r, s, err := dsa.Sign(config.Random(), dsaPriv, digest)
 		if err == nil {
-			sig.DSASigR.bytes = r.Bytes()
 			sig.DSASigR.bitLength = uint16(8 * len(sig.DSASigR.bytes))
-			sig.DSASigS.bytes = s.Bytes()
 			sig.DSASigS.bitLength = uint16(8 * len(sig.DSASigS.bytes))
 		}
 	case PubKeyAlgoECDSA:
-		r, s, err := ecdsa.Sign(config.Random(), priv.PrivateKey.(*ecdsa.PrivateKey), digest)
-		if err == nil {
+		if priv.ExternalSigner != nil {
+			sigBytes, err := priv.ExternalSigner.Sign(config.Random(), digest, config.Hash())
+			if err != nil {
+				return err
+			}
+			type asn1Signature struct {
+				R, S *big.Int
+			}
+			asn1Sig := new(asn1Signature)
+			_, err = asn1.Unmarshal(sigBytes, asn1Sig)
+			if err != nil {
+				return err
+			}
+
+			sig.ECDSASigR = fromBig(asn1Sig.R)
+			sig.ECDSASigS = fromBig(asn1Sig.S)
+		} else {
+			var r, s *big.Int
+			r, s, err := ecdsa.Sign(config.Random(), priv.PrivateKey.(*ecdsa.PrivateKey), digest)
+			if err != nil {
+				return err
+			}
 			sig.ECDSASigR = fromBig(r)
 			sig.ECDSASigS = fromBig(s)
 		}
